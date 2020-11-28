@@ -18,9 +18,13 @@ limitations under the License.
 package mustload
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
+	"strings"
+	"time"
 
 	"github.com/docker/machine/libmachine"
 	"github.com/docker/machine/libmachine/host"
@@ -64,6 +68,12 @@ type ControlPlane struct {
 // Partial is a cmd-friendly way to load a cluster which may or may not be running
 func Partial(name string, miniHome ...string) (libmachine.API, *config.ClusterConfig) {
 	klog.Infof("Loading cluster: %s", name)
+	errorMessage := hasAdminPrivilege()
+	if errorMessage != "" {
+		fixMessage := fmt.Errorf("Right-click the PowerShell icon and select Run as Administrator to open PowerShell in elevated mode.")
+		exit.Error(reason.HypervPrivilegeError, errorMessage, fixMessage)
+	}
+
 	api, err := machine.NewAPIClient(miniHome...)
 	if err != nil {
 		exit.Error(reason.NewAPIClient, "libmachine failed", err)
@@ -79,6 +89,35 @@ func Partial(name string, miniHome ...string) (libmachine.API, *config.ClusterCo
 	}
 
 	return api, cc
+}
+
+// Check user is either a Windows Administrator or a Hyper-V Administrator
+func hasAdminPrivilege() string {
+	path, err := exec.LookPath("powershell")
+	if err != nil {
+		return "failed to look powershell patch"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8 * time.Second)
+	defer cancel()
+
+	adminCheckCmd := exec.CommandContext(ctx, path, "-NoProfile", "-NonInteractive",`@([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")`)
+	adminCheckOut, adminCheckErr := adminCheckCmd.CombinedOutput()
+
+	if adminCheckErr != nil {
+		return fmt.Sprintf("%s returned %q", strings.Join(adminCheckCmd.Args, " "), adminCheckOut)
+	}
+
+	hypervAdminCheckCmd := exec.CommandContext(ctx, path, "-NoProfile", "-NonInteractive", `@([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(([System.Security.Principal.SecurityIdentifier]::new("S-1-5-32-578")))`)
+	hypervAdminCheckOut, hypervAdminCheckErr := hypervAdminCheckCmd.CombinedOutput()
+
+	if hypervAdminCheckErr != nil {
+		return fmt.Sprintf("%s returned %q", strings.Join(hypervAdminCheckCmd.Args, " "), hypervAdminCheckOut)
+	}
+
+	if (strings.TrimSpace(string(adminCheckOut)) != "True") && (strings.TrimSpace(string(hypervAdminCheckOut)) != "True") {
+		return fmt.Sprintf("Hyper-V requires Administrator privileges")
+	}
+	return ""
 }
 
 // Running is a cmd-friendly way to load a running cluster
